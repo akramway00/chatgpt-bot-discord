@@ -559,3 +559,16 @@ client.on("messageCreate", async (message) => {
 
 
 client.login(process.env.TOKEN);
+
+// Config pour host sur Render
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.send('Bot Discord est actif!');
+});
+
+app.listen(PORT, () => {
+  console.log(`Serveur web démarré sur le port ${PORT}`);
+});
