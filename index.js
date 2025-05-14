@@ -561,14 +561,14 @@ client.on("messageCreate", async (message) => {
 client.login(process.env.TOKEN);
 
 // Config pour host sur Render (webService) mais bug duplication devent on dirait , faudrai use un background worker
-// const express = require('express');
-// const app = express();
-// const PORT = process.env.PORT || 3000;
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-// app.get('/', (req, res) => {
-//   res.send('Bot Discord est actif!');
-// });
+app.get('/', (req, res) => {
+  res.send('Bot Discord est actif!');
+});
 
-// app.listen(PORT, () => {
-//   console.log(`Serveur web démarré sur le port ${PORT}`);
-// });
+app.listen(PORT, () => {
+  console.log(`Serveur web démarré sur le port ${PORT}`);
+});
