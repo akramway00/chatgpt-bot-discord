@@ -1,10 +1,10 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require("discord.js");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, InteractionType } = require("discord.js");
 const { OpenAI } = require("openai");
 const { Octokit } = require("@octokit/rest");
 const express = require("express");
 
-// configuration
+// Configuration
 
 const client = new Client({
   intents: [
@@ -23,14 +23,15 @@ const IGNORE_PREFIX      = "!";
 const CHANNELS_WHITELIST = ["1367412607518113853"];          
 const HISTORY_LIMIT      = 10;                               
 const CHUNK_SIZE         = 1900;                             
-const INTERACTION_TIMEOUT = 15 * 60 * 1000;                  
 
 const GITHUB_OWNER = process.env.GITHUB_OWNER;
 const GITHUB_REPO  = process.env.GITHUB_REPO;
 
-let repoContext = null;                               
+let repoContext = null;                                       
 
-//outils
+
+const pendingInteractions = new Map();
+
 
 function formatDateFR(date) {
   const d = new Date(date);
@@ -49,7 +50,7 @@ function chunkString(str) {
 }
 
 function mapDiscordHistory(msgs) {
-
+  
   return msgs
     .reverse() 
     .map(m => ({ role: m.author.bot ? "assistant" : "user", content: m.content }))
@@ -62,7 +63,13 @@ function extractBranchFromMessage(message) {
   return branchMatch ? branchMatch[1] : null;
 }
 
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // Github
+
 async function fetchRepoInfo() {
   try {
     const { data } = await octokit.repos.get({ owner: GITHUB_OWNER, repo: GITHUB_REPO });
@@ -125,7 +132,7 @@ async function getCommitDetails(sha) {
         additions:  f.additions,
         deletions:  f.deletions,
         changes:    f.changes,
-        patch:      f.patch          
+        patch:      f.patch         
       }))
     };
   } catch (error) {
@@ -149,7 +156,8 @@ async function getFileContent(path, branch = null) {
   }
 }
 
-// Wrappers
+// Openai wrappers
+
 async function generateCommitSummary(commit) {
   try {
     const resp = await openai.chat.completions.create({
@@ -254,7 +262,7 @@ async function answerWithContext(channel, userMsg) {
       }
     }
 
-    // Openai
+    // OpenAI
     const resp = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: [
@@ -305,11 +313,10 @@ async function registerCommands() {
     console.log("Slash-cmds enregistrées");
   } catch (error) {
     console.error("Erreur lors de l'enregistrement des commandes slash:", error);
-    throw error;
   }
 }
 
-// Bot
+// Bots
 
 client.on("ready", async () => {
   console.log(`${client.user.tag} est en ligne !`);
@@ -322,121 +329,119 @@ client.on("ready", async () => {
   await registerCommands();
 });
 
-// Interactions 
 
-client.on("interactionCreate", async interaction => {
+async function handleSlashCommand(interaction) {
   if (!interaction.isCommand()) return;
   
-  
-  await interaction.deferReply();
-  const { commandName, options } = interaction;
 
+  const { commandName, options } = interaction;
+  const branch = options.getString("branch");
+  const commitKey = commandName === "resume_commit" ? options.getString("commit") : null;
+  const path = commandName === "contenu_fichier" ? options.getString("chemin") : null;
+  
+  let responseMessage = "";
+  
   try {
+    
+    await interaction.reply({ content: "Traitement en cours...", ephemeral: false });
+    
+    
     if (commandName === "resume_last_commit") {
-      const branch = options.getString("branch");
-      
-      
-      const startTime = Date.now();
-      
       const commit = await getLastCommit(branch);
       
       if (!commit) {
-        return await interaction.editReply('Aucun commit trouvé sur cette branche.');
+        responseMessage = 'Aucun commit trouvé sur cette branche.';
+      } else {
+        const summary = await generateCommitSummary(commit);
+        
+        responseMessage = 
+          `**Résumé du dernier commit${branch ? ` sur la branche ${branch}` : ''}:**\n\n` +
+          `**Auteur:** ${commit.author}\n` +
+          `**Nom du commit:** ${commit.message}\n` +
+          `**Date:** ${commit.date}\n\n` +
+          `${summary}`;
       }
-      
-      
-      if (Date.now() - startTime > INTERACTION_TIMEOUT - 30000) { // 30 secondes de marge
-        return await interaction.editReply("La requête a pris trop de temps. Veuillez réessayer.");
-      }
-      
-      const summary = await generateCommitSummary(commit);
-      
-      await interaction.editReply(
-        `**Résumé du dernier commit${branch ? ` sur la branche ${branch}` : ''}:**\n\n` +
-        `**Auteur:** ${commit.author}\n` +
-        `**Nom du commit:** ${commit.message}\n` +
-        `**Date:** ${commit.date}\n\n` +
-        `${summary}`
-      );
     }
     
     else if (commandName === "resume_commit") {
-      const commitKey = options.getString("commit");
-      const branch = options.getString("branch");
-      
-      
-      const startTime = Date.now();
-      
       
       const commit = commitKey.match(/^[a-f0-9]{7,40}$/i) 
         ? await getCommitDetails(commitKey) 
         : await findCommitByMessage(commitKey, branch);
       
       if (!commit) {
-        return await interaction.editReply(`Aucun commit contenant "${commitKey}" n'a été trouvé${branch ? ` sur la branche ${branch}` : ''}.`);
+        responseMessage = `Aucun commit contenant "${commitKey}" n'a été trouvé${branch ? ` sur la branche ${branch}` : ''}.`;
+      } else {
+        const summary = await generateCommitSummary(commit);
+        
+        responseMessage = 
+          `**Résumé du commit "${commit.message.split('\n')[0]}"${branch ? ` sur la branche ${branch}` : ''}:**\n\n` +
+          `**Auteur:** ${commit.author}\n` +
+          `**SHA:** ${commit.sha.substring(0, 7)}\n` +
+          `**Date:** ${commit.date}\n\n` +
+          `${summary}`;
       }
-      
-      
-      if (Date.now() - startTime > INTERACTION_TIMEOUT - 30000) { // 30 secondes de marge
-        return await interaction.editReply("La requête a pris trop de temps. Veuillez réessayer.");
-      }
-      
-      const summary = await generateCommitSummary(commit);
-      
-      await interaction.editReply(
-        `**Résumé du commit "${commit.message.split('\n')[0]}"${branch ? ` sur la branche ${branch}` : ''}:**\n\n` +
-        `**Auteur:** ${commit.author}\n` +
-        `**SHA:** ${commit.sha.substring(0, 7)}\n` +
-        `**Date:** ${commit.date}\n\n` +
-        `${summary}`
-      );
     }
     
     else if (commandName === "info_repo") {
       
       repoContext = await fetchRepoInfo();
       
-      await interaction.editReply(`**Informations sur le dépôt ${repoContext.name}:**\n\n` +
+      responseMessage = `**Informations sur le dépôt ${repoContext.name}:**\n\n` +
         `📝 Description: ${repoContext.description || 'Aucune description'}\n` +
         `🌿 Branche par défaut: ${repoContext.default_branch}\n` +
-        `🔄 Dernière mise à jour des informations: ${new Date(repoContext.lastUpdated).toLocaleString('fr-FR')}`);
+        `🔄 Dernière mise à jour des informations: ${new Date(repoContext.lastUpdated).toLocaleString('fr-FR')}`;
     }
     
     else if (commandName === "contenu_fichier") {
-      const path = options.getString("chemin");
-      const branch = options.getString("branch");
-      
       const content = await getFileContent(path, branch);
       
       
       if (content.length > CHUNK_SIZE) {
-        await interaction.editReply(`Le fichier **${path}** est trop volumineux pour être affiché en entier. Voici les premières lignes:\n\n\`\`\`\n${content.substring(0, CHUNK_SIZE - 100)}\n...\n\`\`\``);
+        responseMessage = `Le fichier **${path}** est trop volumineux pour être affiché en entier. Voici les premières lignes:\n\n\`\`\`\n${content.substring(0, CHUNK_SIZE - 100)}\n...\n\`\`\``;
       } else {
-        await interaction.editReply(`Contenu du fichier **${path}**${branch ? ` (branche: ${branch})` : ''}:\n\n\`\`\`\n${content}\n\`\`\``);
+        responseMessage = `Contenu du fichier **${path}**${branch ? ` (branche: ${branch})` : ''}:\n\n\`\`\`\n${content}\n\`\`\``;
       }
     }
+    
+    
+    await interaction.editReply(responseMessage);
+    
   } catch (error) {
     console.error(`Erreur lors de l'exécution de la commande ${commandName}:`, error);
-    try { 
-      await interaction.editReply(`Désolé, une erreur s'est produite: ${error.message}`); 
-    } catch (e) {
-      console.error("Erreur lors de l'envoi de la réponse d'erreur:", e);
-      try { 
-        
-        await interaction.followUp({ 
-          content: `Erreur : ${error.message}. Le traitement a pris trop de temps, veuillez réessayer.`, 
-          ephemeral: true 
-        }); 
-      } catch (e2) { 
-        console.error("Erreur lors de l'envoi du followUp:", e2);
-        
-        interaction.channel?.send(`Erreur pendant la commande : ${error.message}. Le traitement a pris trop de temps.`); 
+    try {
+      
+      const errorMessage = `Désolé, une erreur s'est produite: ${error.message}`;
+      
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply(errorMessage);
+      } else {
+        await interaction.reply({ content: errorMessage, ephemeral: true });
+      }
+    } catch (followupError) {
+      console.error("Erreur lors de l'envoi du message d'erreur:", followupError);
+      
+      
+      if (interaction.channel) {
+        try {
+          await interaction.channel.send(`Erreur lors de l'exécution de la commande ${commandName}: ${error.message}`);
+        } catch (finalError) {
+          console.error("Impossible d'envoyer un message dans le canal:", finalError);
+        }
       }
     }
   }
+}
+
+// Interactions
+
+client.on("interactionCreate", async interaction => {
+  if (interaction.isCommand()) {
+    await handleSlashCommand(interaction);
+  }
 });
 
-// Messages
+// Message
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
   if (message.content.startsWith(IGNORE_PREFIX)) return;
@@ -461,8 +466,11 @@ client.on("messageCreate", async message => {
 });
 
 // Logins
-
 client.login(process.env.TOKEN);
+
+client.on('error', error => {
+  console.error('Erreur Discord client:', error);
+});
 
 const app = express();
 app.get("/", (_, res) => res.send("Bot Discord actif"));
